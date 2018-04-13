@@ -1,0 +1,56 @@
+# makefile for btnpart 
+# to build with LSI-C 3.30c trial (http://www.lsi-j.co.jp/freesoft/)
+
+
+O=obj
+X=.exe
+A=lib
+#RM=deltree /y
+RM=del 
+
+
+.SUFFIXES:
+.SUFFIXES: $(X) .$(A) .$(O) .asm .c
+
+
+
+AS=nasm
+ASFLAGS=-f obj -DLSIC_SPECIAL
+CC=lcc
+CFLAGS=
+LD=$(CC)
+LIBS=-lintlib -ltinymain.obj
+LFLAGS=
+
+#UPX=upx -9 --8086 --best
+UPX=@echo nonupx
+
+
+.c.$(O):
+	$(CC) $(CFLAGS) -c -o $@ $*.c
+
+.nas.$(O):
+	$(AS) $(ASFLAGS) -o $@ $*.nas
+
+PROG = btnpart$(X)
+
+
+all: $(PROG) btnpart.mbr fat16hd.pbr
+
+clean:
+	-$(RM) $(PROG)
+	-$(RM) btnpart.mbr
+	-$(RM) fat16hd.pbr
+	-$(RM) *.$(O)
+
+
+btnpart$(X): btnpart.c
+	$(CC) -o $@ $(CFLAGS) btnpart.c $(LIBS) $(LFLAGS)
+	$(UPX) $@
+
+btnpart.mbr: btnp_mbr.nas
+	nasm -f bin -o $@ $<
+
+fat16hd.pbr: f16hdpbr.nas
+	nasm -f bin -o $@ $<
+

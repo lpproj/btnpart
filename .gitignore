@@ -22,4 +22,8 @@
 #
 *.ZIP
 *.zip
+*.MBR
+*.mbr
+*.PBR
+*.pbr
 

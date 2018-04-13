@@ -1,0 +1,60 @@
+# makefile for btnpart
+# to build with (Open)Watcom-C
+
+
+O=obj
+X=.exe
+A=lib
+RM=rm
+#RM=del 
+
+
+.SUFFIXES:
+.SUFFIXES: $(X) .$(A) .$(O) .nas .asm .c
+
+
+AS=nasm
+ASFLAGS=-f obj
+CC=wcl
+CFLAGS=-zq-zp1-s-os -zk0
+LD=$(CC)
+LIBS=
+LFLAGS=-l=dos
+
+UPX=upx -9 --8086 --best
+#UPX=@echo nonupx
+
+
+.c.$(O):
+	$(CC) $(CFLAGS) -c -fo=$@ $*.c
+
+.nas.$(O):
+	$(AS) $(ASFLAGS) -o $@ $*.nas
+
+PROG = btnpart$(X)
+
+
+all: $(PROG) btnpart.mbr fat16hd.pbr
+
+clean:
+	-$(RM) $(PROG)
+	-$(RM) btnpart.mbr
+	-$(RM) fat16hd.pbr
+	-$(RM) *.$(O)
+
+
+btnpart$(X): btnpart.$(O) int86x2.$(O)
+	$(CC) -fe=$@ $(CFLAGS) $< $(LIBS) $(LFLAGS)
+	$(UPX) $@
+
+btnpart.$(O): btnpart.c
+
+int86x2.$(O): int86x2.nas
+
+btnpart.mbr: btnp_mbr.nas
+	nasm -f bin -o $@ $<
+
+fat16hd.pbr: f16hdpbr.nas
+	nasm -f bin -o $@ $<
+
+
