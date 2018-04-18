@@ -51,7 +51,7 @@
 #endif
 
 
-#define VERSIONSTRING "0.0.1"
+#define VERSIONSTRING "0.0.2"
 
 #define IPL_SIZE_MAX 1024
 #define MBR_NAME "btnpart.mbr"
@@ -516,6 +516,7 @@ int build_bpb_for_necfat16(void *boot_sector_buffer, unsigned long physical_sect
   unsigned long scts;
   unsigned long clsts;
   unsigned clst_sct;
+  unsigned long max_clst_size = 32768UL;
   
   /* todo: DOS3.x の論理セクタサイズ対応 */
   bps = size_of_physical_sector;
@@ -530,8 +531,13 @@ int build_bpb_for_necfat16(void *boot_sector_buffer, unsigned long physical_sect
     return BLDFAT_TOOSMALL;
   scts = scts_total - scts_reserved - scts_rootdir; /* todo: re-calc with adding FAT size... */
   for(i = 0, clst_sct = 0; i < 8; ++i) {
+#if 1
+    if (((unsigned long)bps << i) > max_clst_size)
+      return BLDFAT_TOOBIG;
+#else
     if ((unsigned short)(bps << i) < bps)
       break;
+#endif
     clsts = scts >> i;
     if (clsts <= 0xfff6UL) {
       clst_sct = 1 << i;
@@ -999,7 +1005,7 @@ int main(int argc, char *argv[])
   rc = list_hd(geo);
   
   /* fat16 (with 32bit sector count) limitation... */
-  max_fat16part_sectors = (32768UL / geo->bps) * 0xffffUL;
+  max_fat16part_sectors = (32768UL / geo->bps) * 0xfff6UL /* 0xffffUL */;
   max_fat16part_cylinders = max_fat16part_sectors / ((unsigned long)(geo->s) * geo->h);
   if (disp_debug) {
     printf("max_fat16part_sectors = %lu\n", max_fat16part_sectors);
