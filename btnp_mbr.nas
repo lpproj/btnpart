@@ -25,15 +25,45 @@ bootmenu_entry:     ; load & start address for bootmenu
     dw 0
     dw 1e00h
 
+msg_not98:
+    db 'This disk is formatted for NEC PC-98 series.', 0
+
 startup_zero:
+    cld
     push ds
+;.check_nec98_or_ibmpc:
+    mov ax, 0ffffh
+    mov ds, ax
+    cmp word [0003h], 0fd80h
     push cs
     pop ds
+    je .nec98
+    mov ah, 0fh
+    int 10h
+    cmp ah, 0fh
+    je .nec98
+;.ibmpc:
+    call .ibmpc_l0
+.ibmpc_l0:
+    pop si              ; mov si, .ibmpc_l0
+    sub si, .ibmpc_l0 - msg_not98
+    xor bx, bx
+.ibmpc_lp:
+    lodsb
+    test al, al
+    jz .ibmpc_hlt
+    mov ah, 0eh
+    int 10h
+    jmp short .ibmpc_lp
+.ibmpc_hlt:
+    hlt
+    jmp short .ibmpc_hlt
+
+.nec98:
     xor si, si
     mov es, [bootmenu_entry + 2]
     xor di, di
     mov cx, 512
-    cld
     rep movsw
     mov si, startup_real
     pop ds

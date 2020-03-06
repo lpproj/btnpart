@@ -51,12 +51,12 @@
 #endif
 
 
-#define VERSIONSTRING "0.0.2"
+#define VERSIONSTRING "0.0.3"
 
 #define IPL_SIZE_MAX 1024
 #define MBR_NAME "btnpart.mbr"
 #define PBR_NAME "fat16hd.pbr"
-
+#define BOOTSEL_NAME "FreeBSD.MBR"
 
 typedef struct PTABLE_NEC98 {
   unsigned char bootable;
@@ -97,7 +97,6 @@ typedef struct BPB_BOOTSECTOR {
   char file_system[8];
 } BPB_BOOTSECTOR;
 
-
 typedef struct DISK_GEOMETRY {
   int daua;
   int medium_type;
@@ -134,6 +133,13 @@ typedef union DISK_PKT {
   DISK_PKT_LBA  lba;
   DISK_PKT_CHS  chs;
 } DISK_PKT;
+
+typedef struct PART_INFO {
+  DISK_PKT part_begin_chs;
+  DISK_PKT part_end_chs;
+  unsigned long part_begin_lba;
+  unsigned long part_length_by_sector;
+} PART_INFO;
 
 int disp_debug = 0;
 DISK_GEOMETRY diskinfo[16];
@@ -337,6 +343,7 @@ typedef enum {
   NP_NOERR = 0,
   NP_READERR,
   NP_WRITEERR,
+  NP_UNSUPPORTED_SECTOR_SIZE,
   NP_UNSUPPORTED_NECOLD,
   NP_UNSUPPORTED_FDISK,
   NP_UNFORMATTED,
@@ -618,8 +625,7 @@ current_time_to_volume_serial(void)
     return tm_to_volume_serial(tm);
 }
 
-
-int build_partition(const DISK_GEOMETRY *g, const char *partname, unsigned long cylinders)
+int build_partition(const DISK_GEOMETRY *g, const char *partname, unsigned long cylinders, PART_INFO *pinfo)
 {
   PTABLE_NEC98 *pt;
   BPB_BOOTSECTOR *bpb;
@@ -666,7 +672,19 @@ int build_partition(const DISK_GEOMETRY *g, const char *partname, unsigned long 
   if (rc != 0)
     return NP_WRITEERR;
 
-  
+  if (pinfo) {
+    unsigned long lba_end = (unsigned long)(pt->end_c) * (g->s * g->h) +
+                            (unsigned long)(pt->end_h) * g->s +
+                            pt->end_s;
+    pinfo->part_begin_chs = pkt;
+    pinfo->part_end_chs.chs.mode = DISK_PKT_MODE_CHS;
+    pinfo->part_end_chs.chs.c = pt->end_c;
+    pinfo->part_end_chs.chs.h = pt->end_h;
+    pinfo->part_end_chs.chs.s = pt->end_s;
+    pinfo->part_begin_lba = lba;
+    pinfo->part_length_by_sector = lba_end - lba + 1;
+  }
+
   /*
     build fs
   */
@@ -725,15 +743,88 @@ int build_partition(const DISK_GEOMETRY *g, const char *partname, unsigned long 
   return NP_NOERR;
 }
 
-int write_mbr(const DISK_GEOMETRY *g, const void *buffer)
+static void write_mbr_partinfo_lba(void *sector_buffer, const PART_INFO *pinfo, int index)
+{
+  if (pinfo && index >= 0 && index <= 3) {
+    char *p = (char *)sector_buffer + 0x1be + index * 16;
+    p[0] = 0;           /* not bootable */
+    p[1] = p[5] = 0xfe; /* start & end CHS (ignored) */
+    p[2] = p[6] = 0xff;
+    p[3] = p[7] = 0xff;
+    p[4] = 0x06 /* 0x0e */; /* partition type: FAT16B */
+    *(unsigned long *)(p+8) = pinfo->part_begin_lba;
+    *(unsigned long *)(p+12) = pinfo->part_length_by_sector;
+  }
+}
+
+int write_mbr(const DISK_GEOMETRY *g, void *buffer, const PART_INFO *pinfo)
 {
   int rc;
   DISK_PKT pkt;
+
+  if (pinfo) write_mbr_partinfo_lba(buffer, pinfo, 0);
   pkt.lba.mode = DISK_PKT_MODE_LBA;
   pkt.lba.lba = 0;
   rc = diskwrite_hd(g->daua, (void *)buffer, &pkt, g->bps);
   
   return rc ? NP_WRITEERR : NP_NOERR;
+}
+
+static void patch_freebsd98_boot0(char *buffer)
+{
+  if (buffer[0xfc] == 0 && buffer[0xfd] == 0) {
+    disk_buffer[0xfc] = disk_buffer[0x1fc];
+    disk_buffer[0xfd] = disk_buffer[0x1fd];
+  }
+  if (buffer[0xfe] == 0 && buffer[0xff] == 0) {
+    disk_buffer[0xfe] = disk_buffer[0x1fe];
+    disk_buffer[0xff] = disk_buffer[0x1ff];
+  }
+}
+
+int write_mbr_and_loader(const DISK_GEOMETRY *g, const char *filename, const PART_INFO *pinfo)
+{
+  int rc = NP_NOERR;
+  FILE *fi;
+  DISK_PKT pkt;
+  long disk_byte_offset = 0;
+
+  if (g->bps != 512) return NP_UNSUPPORTED_SECTOR_SIZE;
+  pkt.lba.mode = DISK_PKT_MODE_LBA;
+  pkt.lba.lba = 0;
+  fi = fopen(filename, "rb");
+  if (!fi) return NP_READERR;
+  while(!feof(fi)) {
+    size_t nr = 0;
+    memset(disk_buffer, 0 /* 0xe5 */, g->bps);
+    while(nr < g->bps) {
+      size_t nr1 = fread(disk_buffer + nr, 1, g->bps - nr, fi);
+      if (nr1 == 0 || nr1 == (size_t)EOF) break;
+      nr += nr1;
+    }
+    if (ferror(fi)) {
+      rc = NP_READERR;
+      break;
+    }
+    if (nr == 0) break;
+    /* 512..1023: skip nec98 extpart partition table */
+    if (disk_byte_offset < 512 || disk_byte_offset >= 1024) {
+      if (disk_byte_offset < 512 && disk_buffer[0x1fe] == 0x55 && disk_buffer[0x1ff] == 0xaa) {
+        static const char fb98_boot0sig[] =
+        { 0xeb, 0x09, 0x00, 0x00, 'I', 'P', 'L', '1', 0x00, 0x00, 0x00, 0x31, 0xc0 };
+        if (memcmp(disk_buffer, fb98_boot0sig, sizeof(fb98_boot0sig)) == 0) {
+          patch_freebsd98_boot0(disk_buffer);
+        }
+        if (pinfo) write_mbr_partinfo_lba(disk_buffer, pinfo, 0);
+      }
+      rc = diskwrite_hd(g->daua, disk_buffer, &pkt, g->bps);
+      if (rc != NP_NOERR) break;
+    }
+    ++(pkt.lba.lba);
+    disk_byte_offset += nr;
+  }
+  fclose(fi);
+  return rc;
 }
 
 int fill_track(const DISK_GEOMETRY *g, char *tmp_buffer, unsigned long track, unsigned char fillvalue)
@@ -761,6 +852,21 @@ enum {
   YN_NO,
   YN_YES
 };
+
+int getync_default(int do_echo, int fallback)
+{
+  while(1) {
+    union REGS r;
+    r.x.ax = do_echo ? 0x0c01 : 0x0c08;
+    intdos(&r, &r);
+    if (r.h.al == 'y' || r.h.al == 'Y') return YN_YES;
+    if (r.h.al == 'n' || r.h.al == 'N') return YN_NO;
+    if (r.h.al == 0x1b) return YN_CANCEL;
+    if (r.h.al == 0x0a || r.h.al == 0x0d) break;
+  }
+  return fallback;
+}
+
 int getync(int do_echo)
 {
   union REGS r;
@@ -773,7 +879,10 @@ int getync(int do_echo)
   return YN_CANCEL;
 }
 
-char *getline(char *buf, int maxcount)
+
+#define getline(b,c) mygetline(b,c)     /* workaround for OW2.0 (POSIX.1-2008 compliant) */
+
+static char *getline(char *buf, int maxcount)
 {
 #define DEFBUFLEN 128
   static char defbuffer[2 + DEFBUFLEN + 1];
@@ -811,6 +920,20 @@ int load_file(void *buf, const char *fname, unsigned maxlen)
   cnt = fread(buf, 1, maxlen, fi);
   fclose(fi);
   return cnt;
+}
+
+long check_file_length(const char *fname)
+{
+  long len = -1L;
+  FILE *fi = fopen(fname, "rb");
+  if (fi) {
+    if (fseek(fi, 0, SEEK_END) == 0) {
+      len = ftell(fi);
+      fseek(fi, 0, SEEK_SET); /* to be safe... */
+    }
+    fclose(fi);
+  }
+  return len;
 }
 
 unsigned trim_filename(char *s)
@@ -918,6 +1041,38 @@ void *myalloc(size_t n)
   return p;
 }
 
+void *myalloc64k(size_t n)
+{
+  void *p;
+
+  if (n == 0) n = 1;
+  p = myalloc(n);
+  if (p) {
+    unsigned long la = (16UL * FP_SEG((void far *)p)) + FP_OFF(p);
+    if ((la >> 16) != ((la + n - 1) >> 16)) {
+      const char msgFatal[] = "\nmyalloc64k FATAL: 64k memory boundary overflow.\n";
+      void *p2;
+      /* workaround for 64k-bound */
+      p2 = realloc(p, ((la + n) & 0xffff0000UL) - la);
+      if (p2 != p) {
+        fprintf(stderr, msgFatal);
+        exit(-1);
+      }
+      p = p2;
+      p2 = myalloc(n); /* expect p2 is upper than p, followd immediately */
+      free(p);
+      /* to be safe... */
+      la = (16UL * FP_SEG((void far *)p2)) + FP_OFF(p2);
+      if ((la >> 16) != ((la + n - 1) >> 16)) {
+        fprintf(stderr, msgFatal);
+        exit(-1);
+      }
+      p = p2;
+    }
+  }
+  return p;
+}
+
 
 int chk_err(int rc)
 {
@@ -933,6 +1088,7 @@ int chk_err(int rc)
 int main(int argc, char *argv[])
 {
   DISK_GEOMETRY *geo;
+  PART_INFO pinfo;
   int rc;
   int hds;
   int daua;
@@ -940,6 +1096,7 @@ int main(int argc, char *argv[])
   unsigned char *progpath;
   unsigned ppathlen;
   int rewrite_mbr = 1;
+  int use_bootsel = 0;
   unsigned long max_fat16part_sectors;
   unsigned long max_fat16part_cylinders;
   
@@ -949,11 +1106,10 @@ int main(int argc, char *argv[])
     printf("btnpart %s (%s)\n", VERSIONSTRING, buildrev());
     return 0;
   }
-  
+
   disp_debug = optD;
   
   banner();
-  
   
   if (!isNEC98()) {
     printf("This program only works on NEC PC-9801/9821 series.\n");
@@ -966,10 +1122,10 @@ int main(int argc, char *argv[])
     return 0;
   }
   
-  disk_buffer = myalloc(4096);
-  mbr_new = myalloc(IPL_SIZE_MAX);
-  mbr_org = myalloc(IPL_SIZE_MAX);
-  pbr = myalloc(IPL_SIZE_MAX);
+  disk_buffer = myalloc64k(4096);
+  mbr_new = myalloc64k(IPL_SIZE_MAX);
+  mbr_org = myalloc64k(IPL_SIZE_MAX);
+  pbr = myalloc64k(IPL_SIZE_MAX);
   ppathlen = 66;
   if (argv[0] && argv[0][0]) {
     ppathlen = strlen(argv[0]) + 12;
@@ -1062,11 +1218,19 @@ int main(int argc, char *argv[])
     rewrite_mbr = getync(1) == YN_YES;
     printf("\n");
   }
-  
+
+  if (optF) rewrite_mbr = 1;
+
+  if (rewrite_mbr && geo->bps == 512 && check_file_length(BOOTSEL_NAME) != -1L) {
+    printf("FreeBSD(98) ブートセレクタが利用可能です\n");
+    printf("FreeBSD(98) ブートセレクタを IPL として利用しますか？(Y/n) ");
+    use_bootsel = getync_default(1, YN_YES) == YN_YES;
+    printf("\n");
+  }
+
   /* write into the disk... */
   
   if (optF) {
-    rewrite_mbr = 1;
     optTrack0 = 1;
     printf("ハードディスクのフォーマット中（時間がかかるかもしれません）…");
     fflush(stdout);
@@ -1079,11 +1243,17 @@ int main(int argc, char *argv[])
   }
   
   printf("DOS 領域作成中…");
-  chk_err(build_partition(geo, partname, max_fat16part_cylinders));
+  chk_err(build_partition(geo, partname, max_fat16part_cylinders, &pinfo));
   
   if (rewrite_mbr) {
-    printf("IPL(MBR) 書き換え…");
-    chk_err(write_mbr(geo, mbr_new));
+    if (use_bootsel) {
+      printf("FreeBSD(98) ブートセレクタ書き込み…");
+      chk_err(write_mbr_and_loader(geo, BOOTSEL_NAME, &pinfo));
+    }
+    else {
+      printf("IPL(MBR) 書き換え…");
+      chk_err(write_mbr(geo, mbr_new, &pinfo));
+    }
   }
   
   printf("\n");

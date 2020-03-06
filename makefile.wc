@@ -1,6 +1,7 @@
 # makefile for btnpart
 # to build with (Open)Watcom-C
-
+#
+# to build: make -h -e -f makefile.wc
 
 O=obj
 X=.exe
@@ -16,7 +17,7 @@ RM=rm
 AS=nasm
 ASFLAGS=-f obj
 CC=wcl
-CFLAGS=-zq-zp1-s-os -zk0
+CFLAGS=-zq-zp1-s-os -zk0 -Fr
 LD=$(CC)
 LIBS=
 LFLAGS=-l=dos
