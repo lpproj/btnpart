@@ -10,6 +10,8 @@
     CPU 8086
     ORG 0
 
+%define STACK_SIZE_PARA		20h
+
 
 %macro _org 1
   times (%1 - ($-top)) db 0
@@ -72,6 +74,14 @@ startup_zero:
     retf
 
 startup_real:
+    mov [cs: org_sp], sp
+    mov [cs: org_ss], ss
+    push cs
+    pop ax
+    sub ax, STACK_SIZE_PARA
+    mov ss, ax
+    mov sp, (STACK_SIZE_PARA) * 16
+    
     mov al, [0584h] ; 0000:0584 DISK_BOOT
     mov ah, 8eh     ; wake up, HDD
     int 1bh
@@ -93,12 +103,15 @@ startup_real:
     mov bx, 1024
     int 1bh
     xor ah, ah    ; is it needed?
+    mov ss, [cs: org_ss]
+    mov sp, [cs: org_sp]
     push es       ; jump to PBR
     push bp
     retf
     
 
-
+org_sp  dw 0
+org_ss  dw 0
 
     ; boot signeture (for 256bytes per sector)
     _org 0fah
