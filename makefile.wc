@@ -22,7 +22,7 @@ LD=$(CC)
 LIBS=
 LFLAGS=-l=dos
 
-UPX=upx -9 --8086 --best
+UPX=upx --8086 --best --mono
 #UPX=@echo nonupx
 
 
@@ -37,7 +37,7 @@ PROG = btnpart$(X)
 
 all: $(PROG) btnpart.mbr fat16hd.pbr
 
-clean:
+clean: .SYMBOLIC
 	-$(RM) $(PROG)
 	-$(RM) btnpart.mbr
 	-$(RM) fat16hd.pbr
