@@ -51,7 +51,7 @@
 #endif
 
 
-#define VERSIONSTRING "0.0.3"
+#define VERSIONSTRING "0.0.4"
 
 #define IPL_SIZE_MAX 1024
 #define MBR_NAME "btnpart.mbr"
@@ -625,7 +625,7 @@ current_time_to_volume_serial(void)
     return tm_to_volume_serial(tm);
 }
 
-int build_partition(const DISK_GEOMETRY *g, const char *partname, unsigned long cylinders, PART_INFO *pinfo)
+int build_partition(const DISK_GEOMETRY *g, const char *partname, unsigned long cylinders, PART_INFO *pinfo, unsigned char fat_id)
 {
   PTABLE_NEC98 *pt;
   BPB_BOOTSECTOR *bpb;
@@ -715,7 +715,7 @@ int build_partition(const DISK_GEOMETRY *g, const char *partname, unsigned long 
   for(j=0; j<bpb->fats; ++j) {
     for(i=0; i<bpb->sectors_per_fat; ++i) {
       if (i==0) {
-        disk_buffer[0] = 0xfe;
+        disk_buffer[0] = fat_id;
         disk_buffer[1] = 0xff;
         disk_buffer[2] = 0xff;
         disk_buffer[3] = 0xff;
@@ -757,7 +757,16 @@ static void write_mbr_partinfo_lba(void *sector_buffer, const PART_INFO *pinfo, 
   }
 }
 
-int write_mbr(const DISK_GEOMETRY *g, void *buffer, const PART_INFO *pinfo)
+static void patch_mbr_offset002(void *buffer)
+{
+    char *s = buffer;
+
+    if (*s == 0xeb && s[2] == 0x90 && s[3] == 0x90) {
+        s[2] = s[3] = 0;
+    }
+}
+
+int write_mbr(const DISK_GEOMETRY *g, void *buffer, const PART_INFO *pinfo, int patch_002)
 {
   int rc;
   DISK_PKT pkt;
@@ -765,6 +774,7 @@ int write_mbr(const DISK_GEOMETRY *g, void *buffer, const PART_INFO *pinfo)
   if (pinfo) write_mbr_partinfo_lba(buffer, pinfo, 0);
   pkt.lba.mode = DISK_PKT_MODE_LBA;
   pkt.lba.lba = 0;
+  if (patch_002) patch_mbr_offset002(buffer);
   rc = diskwrite_hd(g->daua, (void *)buffer, &pkt, g->bps);
   
   return rc ? NP_WRITEERR : NP_NOERR;
@@ -782,7 +792,7 @@ static void patch_freebsd98_boot0(char *buffer)
   }
 }
 
-int write_mbr_and_loader(const DISK_GEOMETRY *g, const char *filename, const PART_INFO *pinfo)
+int write_mbr_and_loader(const DISK_GEOMETRY *g, const char *filename, const PART_INFO *pinfo, int patch_002)
 {
   int rc = NP_NOERR;
   FILE *fi;
@@ -815,6 +825,7 @@ int write_mbr_and_loader(const DISK_GEOMETRY *g, const char *filename, const PAR
         if (memcmp(disk_buffer, fb98_boot0sig, sizeof(fb98_boot0sig)) == 0) {
           patch_freebsd98_boot0(disk_buffer);
         }
+        if (patch_002) patch_mbr_offset002(disk_buffer);
         if (pinfo) write_mbr_partinfo_lba(disk_buffer, pinfo, 0);
       }
       rc = diskwrite_hd(g->daua, disk_buffer, &pkt, g->bps);
@@ -958,6 +969,7 @@ int optHelp;
 int optV;
 int optVersion;
 int optTrack0;
+int optNecFat;
 
 int getopt(int argc, char *argv[])
 {
@@ -986,12 +998,14 @@ int getopt(int argc, char *argv[])
     else if (c == '-' && s[1] == '-') {
       s += 2;
       if (strcmp(s, "help")==0) optHelp = 1;
-      if (strcmp(s, "debug")==0) optD = 1;
-      if (strcmp(s, "verbose")==0) optV = 1;
-      if (strcmp(s, "version")==0) optVersion = 1;
-      if (strcmp(s, "format")==0) { optF = 1; optTrack0 = 1; }
-      if (strcmp(s, "erase-track0")==0) optTrack0 = 1;
-      if (strcmp(s, "format-track0")==0) optTrack0 = 1; /* obsolete */
+      else if (strcmp(s, "debug")==0) optD = 1;
+      else if (strcmp(s, "verbose")==0) optV = 1;
+      else if (strcmp(s, "version")==0) optVersion = 1;
+      else if (strcmp(s, "format")==0) { optF = 1; optTrack0 = 1; }
+      else if (strcmp(s, "erase-track0")==0) optTrack0 = 1;
+      else if (strcmp(s, "format-track0")==0) optTrack0 = 1; /* obsolete */
+      else if (strcmp(s, "necfatid")==0) optNecFat = 1;
+      else if (strcmp(s, "ibmfatid")==0 || strcmp(s, "stdfatid")==0) optNecFat = 0;
     }
     else {
       /* not option */
@@ -1243,16 +1257,16 @@ int main(int argc, char *argv[])
   }
   
   printf("DOS 領域作成中…");
-  chk_err(build_partition(geo, partname, max_fat16part_cylinders, &pinfo));
+  chk_err(build_partition(geo, partname, max_fat16part_cylinders, &pinfo, optNecFat ? 0xfe:0xf8));
   
   if (rewrite_mbr) {
     if (use_bootsel) {
       printf("FreeBSD(98) ブートセレクタ書き込み…");
-      chk_err(write_mbr_and_loader(geo, BOOTSEL_NAME, &pinfo));
+      chk_err(write_mbr_and_loader(geo, BOOTSEL_NAME, &pinfo, !optNecFat));
     }
     else {
       printf("IPL(MBR) 書き換え…");
-      chk_err(write_mbr(geo, mbr_new, &pinfo));
+      chk_err(write_mbr(geo, mbr_new, &pinfo, !optNecFat));
     }
   }
   
