@@ -21,7 +21,7 @@ segment TEXT
 
 top:
     jmp short startup_zero
-    db 90h, 90h
+    db 00h, 00h     ; (00 00: some help to SD-IDE adapter for detecting MBR)
     db 'IPL1'
 bootmenu_entry:     ; load & start address for bootmenu
     dw 0
@@ -113,7 +113,14 @@ startup_real:
 org_sp  dw 0
 org_ss  dw 0
 
-    ; boot signeture (for 256bytes per sector)
+    ; reserved for disk timestamp (modern MBR)
+    _org 0dah
+
+    dw 0
+    db 80h
+    db 0, 0, 0
+
+    ; boot signature (for 256bytes per sector)
     _org 0fah
 
 autoboot:
@@ -125,7 +132,13 @@ bootmenu_version:
     db 0
     db  55h, 0aah ; PC-9801 `Extended' partitioning disk
 
-    ; ditto (for 512bytes per sector)
+    ; nt_magic: reserved for Windows NT disk signature (modern MBR)
+    _org 1b8h
+
+    dd 0
+    dw 0
+
+    ; duplicate boot signature (for 512bytes per sector)
     _org 1fah
 
 ;autoboot:
